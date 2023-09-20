@@ -120,6 +120,9 @@ class PhoenixStructurer(StructurerBase):
 
         has_cycle = self._has_cycle()
 
+        if self._region.addr == 0x40146c:
+            breakpoint()
+
         # special handling for single-node loops
         if len(self._region.graph.nodes) == 1 and has_cycle:
             self._analyze_cyclic()
@@ -397,6 +400,7 @@ class PhoenixStructurer(StructurerBase):
                                     drop_succ = True
 
                             new_node = SequenceNode(node.addr, nodes=[node] if drop_succ else [node, succ])
+                            breakpoint()
                             loop_node = LoopNode("do-while", edge_cond_succhead, new_node, addr=node.addr)
 
                             # on the original graph
@@ -417,6 +421,7 @@ class PhoenixStructurer(StructurerBase):
                     # c = !c
                     self._remove_last_statement_if_jump(node)
                     seq_node = SequenceNode(node.addr, nodes=[node]) if not isinstance(node, SequenceNode) else node
+                    breakpoint()
                     loop_node = LoopNode("do-while", edge_cond_head, seq_node, addr=seq_node.addr)
 
                     # on the original graph
@@ -469,7 +474,16 @@ class PhoenixStructurer(StructurerBase):
         return self._refine_cyclic_core(self._region.head)
 
     def _refine_cyclic_core(self, loop_head) -> bool:
+        # find all nodes that belong to the loop
+        components = list(networkx.strongly_connected_components(self._region.graph))
+        nodes = set()
+        for component in components:
+            if loop_head in component:
+                nodes |= set(component)
+
         graph: networkx.DiGraph = self._region.graph
+        loop_graph: networkx.DiGraph = networkx.DiGraph(networkx.subgraph(self._region.graph, nodes))
+        breakpoint()
         fullgraph: networkx.DiGraph = self._region.graph_with_successors
         if fullgraph is None:
             fullgraph = networkx.DiGraph(self._region.graph)
@@ -481,8 +495,8 @@ class PhoenixStructurer(StructurerBase):
         # continue_node either the loop header for while(true) loops or the loop header predecessor for do-while loops
         continue_node = loop_head
 
-        is_while, result_while = self._refine_cyclic_is_while_loop(graph, fullgraph, loop_head, head_succs)
-        is_dowhile, result_dowhile = self._refine_cyclic_is_dowhile_loop(graph, fullgraph, loop_head, head_succs)
+        is_while, result_while = self._refine_cyclic_is_while_loop(loop_graph, fullgraph, loop_head, head_succs)
+        is_dowhile, result_dowhile = self._refine_cyclic_is_dowhile_loop(loop_graph, fullgraph, loop_head, head_succs)
 
         continue_edges: List[Tuple[BaseNode, BaseNode]] = []
         outgoing_edges: List = []
@@ -491,12 +505,27 @@ class PhoenixStructurer(StructurerBase):
             # gotta pick one!
             # for now, we handle the most common case: both successors exist in the graph of the parent region, and
             # one successor has a path to the other successor
+            picked = False
             if self._parent_region is not None:
                 succ_while = result_while[-1]
                 succ_dowhile = result_dowhile[-1]
                 if succ_while in self._parent_region.graph and succ_dowhile in self._parent_region.graph:
+                    picked = True
                     sorted_nodes = GraphUtils.quasi_topological_sort_nodes(
                         self._parent_region.graph, loop_heads=[self._parent_region.head]
+                    )
+                    succ_while_idx = sorted_nodes.index(succ_while)
+                    succ_dowhile_idx = sorted_nodes.index(succ_dowhile)
+                    if succ_dowhile_idx < succ_while_idx:
+                        # pick do-while
+                        is_while = False
+            if not picked:
+                # check full graph
+                succ_while = result_while[-1]
+                succ_dowhile = result_dowhile[-1]
+                if succ_while in fullgraph and succ_dowhile in fullgraph:
+                    sorted_nodes = GraphUtils.quasi_topological_sort_nodes(
+                        fullgraph, loop_heads=[self._region.head]
                     )
                     succ_while_idx = sorted_nodes.index(succ_while)
                     succ_dowhile_idx = sorted_nodes.index(succ_dowhile)
@@ -515,9 +544,9 @@ class PhoenixStructurer(StructurerBase):
             # natural loop. select *any* exit edge to determine the successor
             # well actually, to maintain determinism, we select the successor with the highest address
             successor_candidates = set()
-            for node in graph.nodes:
+            for node in loop_graph.nodes:
                 for succ in fullgraph.successors(node):
-                    if succ not in graph:
+                    if succ not in loop_graph:
                         successor_candidates.add(succ)
                     if loop_head is succ:
                         continue_edges.append((node, succ))
@@ -527,7 +556,7 @@ class PhoenixStructurer(StructurerBase):
                 # virtualize all other edges
                 for succ in successor_candidates:
                     for pred in fullgraph.predecessors(succ):
-                        if pred in graph:
+                        if pred in loop_graph:
                             outgoing_edges.append((pred, succ))
 
         if outgoing_edges:
@@ -660,8 +689,14 @@ class PhoenixStructurer(StructurerBase):
 
                 else:
                     self.virtualized_edges.add((src, dst))
+                    if graph.has_edge(src, dst):
+                        graph.remove_edge(src, dst)
+                        if graph.in_degree[dst] == 0:
+                            # drop this node
+                            graph.remove_node(dst)
                     fullgraph.remove_edge(src, dst)
                     if fullgraph.in_degree[dst] == 0:
+                        breakpoint()
                         # drop this node
                         fullgraph.remove_node(dst)
                         if dst in self._region.successors:
@@ -739,9 +774,9 @@ class PhoenixStructurer(StructurerBase):
         return bool(outgoing_edges or len(continue_edges) > 1)
 
     def _refine_cyclic_is_while_loop(
-        self, graph, fullgraph, loop_head, head_succs
+        self, loop_graph, fullgraph, loop_head, head_succs
     ) -> Tuple[bool, Optional[Tuple[List, List, BaseNode, BaseNode]]]:
-        if len(head_succs) == 2 and any(head_succ not in graph for head_succ in head_succs):
+        if len(head_succs) == 2 and any(head_succ not in loop_graph for head_succ in head_succs):
             # make sure the head_pred is not already structured
             _, head_block_0 = self._find_node_going_to_dst(loop_head, head_succs[0])
             _, head_block_1 = self._find_node_going_to_dst(loop_head, head_succs[1])
@@ -750,13 +785,13 @@ class PhoenixStructurer(StructurerBase):
                 # virtualize all other edges
                 continue_edges: List[Tuple[BaseNode, BaseNode]] = []
                 outgoing_edges = []
-                successor = next(iter(head_succ for head_succ in head_succs if head_succ not in graph))
-                for node in graph.nodes:
+                successor = next(iter(head_succ for head_succ in head_succs if head_succ not in loop_graph))
+                for node in loop_graph.nodes:
                     succs = list(fullgraph.successors(node))
                     if loop_head in succs:
                         continue_edges.append((node, loop_head))
 
-                    outside_succs = [succ for succ in succs if succ not in graph]
+                    outside_succs = [succ for succ in succs if succ not in loop_graph]
                     for outside_succ in outside_succs:
                         outgoing_edges.append((node, outside_succ))
 
@@ -764,14 +799,14 @@ class PhoenixStructurer(StructurerBase):
         return False, None
 
     def _refine_cyclic_is_dowhile_loop(  # pylint:disable=unused-argument
-        self, graph, fullgraph, loop_head, head_succs
+        self, loop_graph, fullgraph, loop_head, head_succs
     ) -> Tuple[bool, Optional[Tuple[List, List, BaseNode, BaseNode]]]:
         # check if there is an out-going edge from the loop tail
         head_preds = list(fullgraph.predecessors(loop_head))
         if len(head_preds) == 1:
             head_pred = head_preds[0]
             head_pred_succs = list(fullgraph.successors(head_pred))
-            if len(head_pred_succs) == 2 and any(nn not in graph for nn in head_pred_succs):
+            if len(head_pred_succs) == 2 and any(nn not in loop_graph for nn in head_pred_succs):
                 # make sure the head_pred is not already structured
                 _, src_block_0 = self._find_node_going_to_dst(head_pred, head_pred_succs[0])
                 _, src_block_1 = self._find_node_going_to_dst(head_pred, head_pred_succs[1])
@@ -780,16 +815,16 @@ class PhoenixStructurer(StructurerBase):
                     outgoing_edges = []
                     # there is an out-going edge from the loop tail
                     # virtualize all other edges
-                    successor = next(iter(nn for nn in head_pred_succs if nn not in graph))
+                    successor = next(iter(nn for nn in head_pred_succs if nn not in loop_graph))
                     continue_node = head_pred
-                    for node in graph.nodes:
+                    for node in loop_graph.nodes:
                         if node is head_pred:
                             continue
                         succs = list(fullgraph.successors(node))
                         if head_pred in succs:
                             continue_edges.append((node, head_pred))
 
-                        outside_succs = [succ for succ in succs if succ not in graph]
+                        outside_succs = [succ for succ in succs if succ not in loop_graph]
                         for outside_succ in outside_succs:
                             outgoing_edges.append((node, outside_succ))
 

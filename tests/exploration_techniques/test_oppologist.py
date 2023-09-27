@@ -4,6 +4,7 @@ __package__ = __package__ or "tests.exploration_techniques"  # pylint:disable=re
 
 import unittest
 import os
+import sys
 
 import angr
 

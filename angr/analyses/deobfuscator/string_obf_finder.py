@@ -74,6 +74,9 @@ class StringObfuscationFinder(Analysis):
             if self.project.kb.functions.callgraph.out_degree[func.addr] != 0:
                 continue
 
+            if func.addr != 0x140001A90:
+                continue
+
             # find its callsites and arguments
             callers = list(
                 pred for pred in self.project.kb.functions.callgraph.predecessors(func.addr) if pred != func.addr
@@ -291,6 +294,9 @@ class StringObfuscationFinder(Analysis):
                 continue
 
             if self.project.kb.functions.callgraph.out_degree[func.addr] != 0:
+                continue
+
+            if func.addr != 0x140001A18:
                 continue
 
             # find its callsites and arguments
